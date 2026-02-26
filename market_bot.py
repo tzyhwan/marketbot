@@ -41,7 +41,8 @@ def get_btc_price():
             "?ids=bitcoin&vs_currencies=usd&include_24hr_change=true"
             "&include_market_cap=true&include_24hr_vol=true"
         )
-        r = requests.get(url, timeout=10)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, timeout=10, headers=headers)
         r.raise_for_status()
         d = r.json()["bitcoin"]
         return {
