@@ -109,12 +109,14 @@ def get_binance_futures_data():
     except Exception:
         result["long_pct"] = None
 
-    # Liquidations — last 1 hour
+    # Liquidations — last 1 hour (filter by time client-side)
     try:
         r = requests.get("https://fapi.binance.com/fapi/v1/allForceOrders",
-                         params={"symbol": "BTCUSDT", "startTime": one_hour_ago_ms, "limit": 1000}, timeout=10)
+                         params={"symbol": "BTCUSDT", "limit": 1000}, timeout=10)
         if r.ok:
             orders = r.json()
+            # Filter to last 1 hour using order time field
+            orders = [o for o in orders if int(o.get("time", 0)) >= one_hour_ago_ms]
             liq_long  = sum(float(o["origQty"]) * float(o["price"]) for o in orders if o["side"] == "SELL")
             liq_short = sum(float(o["origQty"]) * float(o["price"]) for o in orders if o["side"] == "BUY")
             result["liq_longs_usd"]  = round(liq_long  / 1e6, 2)
@@ -179,29 +181,25 @@ def get_bybit_futures_data():
     except Exception:
         result["long_pct"] = None
 
-    # Liquidations — last 1 hour (Bybit provides liq records)
-    try:
-        r = requests.get("https://api.bybit.com/v5/market/recent-trade",
-                         params={"category": "linear", "symbol": "BTCUSDT", "limit": 1000}, timeout=10)
-        # Bybit doesn't have a free liq endpoint; mark N/A
-        result["liq_longs_usd"]  = None
-        result["liq_shorts_usd"] = None
-    except Exception:
-        result["liq_longs_usd"]  = None
-        result["liq_shorts_usd"] = None
-
-    # Use liquidation websocket data via REST snapshot
+    # Liquidations — last 1 hour via v5 liq endpoint
     try:
         r = requests.get("https://api.bybit.com/v5/market/liquidation",
                          params={"category": "linear", "symbol": "BTCUSDT", "limit": 200}, timeout=10)
         if r.ok:
             lst = r.json().get("result", {}).get("list", [])
-            liq_long  = sum(float(o["size"]) * float(o["price"]) for o in lst if o["side"] == "Buy")
-            liq_short = sum(float(o["size"]) * float(o["price"]) for o in lst if o["side"] == "Sell")
+            # side: "Buy" means a short was liquidated (forced buy), "Sell" = long liquidated
+            liq_long  = sum(float(o["size"]) * float(o["price"]) for o in lst
+                            if o.get("side") == "Sell" and int(o.get("updatedTime", 0)) >= now_ms - 3600000)
+            liq_short = sum(float(o["size"]) * float(o["price"]) for o in lst
+                            if o.get("side") == "Buy"  and int(o.get("updatedTime", 0)) >= now_ms - 3600000)
             result["liq_longs_usd"]  = round(liq_long  / 1e6, 2)
             result["liq_shorts_usd"] = round(liq_short / 1e6, 2)
+        else:
+            result["liq_longs_usd"]  = None
+            result["liq_shorts_usd"] = None
     except Exception:
-        pass
+        result["liq_longs_usd"]  = None
+        result["liq_shorts_usd"] = None
 
     return result
 
@@ -258,33 +256,38 @@ def get_hyperliquid_data():
     except Exception:
         pass
 
-    # Liquidations — last 1 hour
+    # Liquidations — via clearinghouseState (liquidated positions in recent fills)
     try:
         r = requests.post("https://api.hyperliquid.xyz/info",
-                          json={"type": "userFills", "user": "0x0000000000000000000000000000000000000000"},
-                          headers={"Content-Type": "application/json"},
-                          timeout=10)
-        result["liq_longs_usd"]  = None
-        result["liq_shorts_usd"] = None
-    except Exception:
-        result["liq_longs_usd"]  = None
-        result["liq_shorts_usd"] = None
-
-    # Proper liquidation endpoint
-    try:
-        r = requests.post("https://api.hyperliquid.xyz/info",
-                          json={"type": "liquidations", "coin": "BTC",
-                                "startTime": one_hour_ago_ms, "endTime": now_ms},
+                          json={"type": "liquidationsByUser",
+                                "startTime": one_hour_ago_ms},
                           headers={"Content-Type": "application/json"},
                           timeout=10)
         if r.ok and isinstance(r.json(), list):
             liqs = r.json()
-            liq_long  = sum(float(l.get("sz", 0)) * float(l.get("px", 0)) for l in liqs if l.get("side") == "B")
-            liq_short = sum(float(l.get("sz", 0)) * float(l.get("px", 0)) for l in liqs if l.get("side") == "A")
-            result["liq_longs_usd"]  = round(liq_long  / 1e6, 2)
-            result["liq_shorts_usd"] = round(liq_short / 1e6, 2)
+            liq_long  = sum(float(l.get("liquidatedNtlPos", 0)) for l in liqs if float(l.get("liquidatedNtlPos", 0)) < 0)
+            liq_short = sum(float(l.get("liquidatedNtlPos", 0)) for l in liqs if float(l.get("liquidatedNtlPos", 0)) > 0)
+            result["liq_longs_usd"]  = round(abs(liq_long)  / 1e6, 2)
+            result["liq_shorts_usd"] = round(abs(liq_short) / 1e6, 2)
+        else:
+            # Fallback: use recentTrades with isLiquidation flag
+            r2 = requests.post("https://api.hyperliquid.xyz/info",
+                               json={"type": "recentTrades", "coin": "BTC"},
+                               headers={"Content-Type": "application/json"},
+                               timeout=10)
+            if r2.ok and isinstance(r2.json(), list):
+                trades = [t for t in r2.json()
+                          if t.get("liquidation") and int(t.get("time", 0)) >= one_hour_ago_ms]
+                liq_long  = sum(float(t["sz"]) * float(t["px"]) for t in trades if t.get("side") == "B")
+                liq_short = sum(float(t["sz"]) * float(t["px"]) for t in trades if t.get("side") == "A")
+                result["liq_longs_usd"]  = round(liq_long  / 1e6, 2)
+                result["liq_shorts_usd"] = round(liq_short / 1e6, 2)
+            else:
+                result["liq_longs_usd"]  = None
+                result["liq_shorts_usd"] = None
     except Exception:
-        pass
+        result["liq_longs_usd"]  = None
+        result["liq_shorts_usd"] = None
 
     return result
 
