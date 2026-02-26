@@ -109,14 +109,14 @@ def get_binance_futures_data():
     except Exception:
         result["long_pct"] = None
 
-    # Liquidations — last 1 hour (filter by time client-side)
+    # Liquidations — last 24h (allForceOrders returns recent batch, filter client-side)
     try:
+        twenty_four_ago_ms = now_ms - 86400 * 1000
         r = requests.get("https://fapi.binance.com/fapi/v1/allForceOrders",
                          params={"symbol": "BTCUSDT", "limit": 1000}, timeout=10)
         if r.ok:
             orders = r.json()
-            # Filter to last 1 hour using order time field
-            orders = [o for o in orders if int(o.get("time", 0)) >= one_hour_ago_ms]
+            orders = [o for o in orders if int(o.get("time", 0)) >= twenty_four_ago_ms]
             liq_long  = sum(float(o["origQty"]) * float(o["price"]) for o in orders if o["side"] == "SELL")
             liq_short = sum(float(o["origQty"]) * float(o["price"]) for o in orders if o["side"] == "BUY")
             result["liq_longs_usd"]  = round(liq_long  / 1e6, 2)
@@ -135,15 +135,14 @@ def get_bybit_futures_data():
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     one_hour_ago_ms = now_ms - 3600 * 1000
 
-    # Open Interest
+    # Open Interest — use tickers endpoint (more reliable)
     try:
-        r = requests.get("https://api.bybit.com/v5/market/open-interest",
-                         params={"category": "linear", "symbol": "BTCUSDT", "intervalTime": "1h", "limit": 1}, timeout=10)
+        r = requests.get("https://api.bybit.com/v5/market/tickers",
+                         params={"category": "linear", "symbol": "BTCUSDT"}, timeout=10)
         if r.ok:
-            data = r.json()
-            oi_list = data.get("result", {}).get("list", [])
-            if oi_list:
-                oi_usd = float(oi_list[0]["openInterestValue"])
+            lst = r.json().get("result", {}).get("list", [])
+            if lst:
+                oi_usd = float(lst[0].get("openInterestValue", 0))
                 result["oi_usd"] = round(oi_usd / 1e9, 2)
             else:
                 result["oi_usd"] = None
@@ -181,17 +180,18 @@ def get_bybit_futures_data():
     except Exception:
         result["long_pct"] = None
 
-    # Liquidations — last 1 hour via v5 liq endpoint
+    # Liquidations — last 24h via v5 liq endpoint
     try:
+        twenty_four_ago_ms = now_ms - 86400 * 1000
         r = requests.get("https://api.bybit.com/v5/market/liquidation",
-                         params={"category": "linear", "symbol": "BTCUSDT", "limit": 200}, timeout=10)
+                         params={"category": "linear", "symbol": "BTCUSDT", "limit": 1000}, timeout=10)
         if r.ok:
             lst = r.json().get("result", {}).get("list", [])
-            # side: "Buy" means a short was liquidated (forced buy), "Sell" = long liquidated
+            # "Sell" side = long position was liquidated; "Buy" = short was liquidated
             liq_long  = sum(float(o["size"]) * float(o["price"]) for o in lst
-                            if o.get("side") == "Sell" and int(o.get("updatedTime", 0)) >= now_ms - 3600000)
+                            if o.get("side") == "Sell" and int(o.get("updatedTime", 0)) >= twenty_four_ago_ms)
             liq_short = sum(float(o["size"]) * float(o["price"]) for o in lst
-                            if o.get("side") == "Buy"  and int(o.get("updatedTime", 0)) >= now_ms - 3600000)
+                            if o.get("side") == "Buy"  and int(o.get("updatedTime", 0)) >= twenty_four_ago_ms)
             result["liq_longs_usd"]  = round(liq_long  / 1e6, 2)
             result["liq_shorts_usd"] = round(liq_short / 1e6, 2)
         else:
@@ -249,7 +249,7 @@ def get_hyperliquid_data():
     try:
         r = requests.post("https://api.hyperliquid.xyz/info",
                           json={"type": "fundingHistory", "coin": "BTC",
-                                "startTime": one_hour_ago_ms},
+                                "startTime": now_ms - 86400 * 1000},
                           headers={"Content-Type": "application/json"},
                           timeout=10)
         # fundingHistory doesn't give L/S directly; skip
@@ -260,7 +260,7 @@ def get_hyperliquid_data():
     try:
         r = requests.post("https://api.hyperliquid.xyz/info",
                           json={"type": "liquidationsByUser",
-                                "startTime": one_hour_ago_ms},
+                                "startTime": now_ms - 86400 * 1000},
                           headers={"Content-Type": "application/json"},
                           timeout=10)
         if r.ok and isinstance(r.json(), list):
@@ -381,16 +381,16 @@ def claude_market_snapshot(btc, bin_f, byb_f, hl_f):
 
 BTC Price: ${:,} ({:.2f}% 24h)  |  Volume: ${:,.0f} (Binance)
 
-Derivatives snapshot across exchanges (5min L/S | 1hr liquidations):
+Derivatives snapshot across exchanges (5min L/S | 24h liquidations):
 
 Binance Futures:
-- OI: {}  Funding: {}  L/S (5m): {}  Liqs (1h): {}
+- OI: {}  Funding: {}  L/S (5m): {}  Liqs (24h): {}
 
 Bybit:
-- OI: {}  Funding: {}  L/S (5m): {}  Liqs (1h): {}
+- OI: {}  Funding: {}  L/S (5m): {}  Liqs (24h): {}
 
 Hyperliquid:
-- OI: {}  Funding: {}  Liqs (1h): {}
+- OI: {}  Funding: {}  Liqs (24h): {}
 
 Write a punchy 4-6 sentence snapshot. Compare signals across exchanges where interesting. Highlight funding extremes, OI divergence, or liq imbalances.
 End with a one-line bias: Bullish / Bearish / Neutral and why.
@@ -532,14 +532,14 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 Binance Futures\n"
         "OI: {}  |  Funding: {}\n"
         "L/S (5m): {}\n"
-        "Liqs (1h): {}\n\n"
+        "Liqs (24h): {}\n\n"
         "📊 Bybit\n"
         "OI: {}  |  Funding: {}\n"
         "L/S (5m): {}\n"
-        "Liqs (1h): {}\n\n"
+        "Liqs (24h): {}\n\n"
         "📊 Hyperliquid\n"
         "OI: {}  |  Funding: {}\n"
-        "Liqs (1h): {}\n\n"
+        "Liqs (24h): {}\n\n"
         "🤖 AI Analysis:\n{}\n\n"
         "Time: {} UTC"
     ).format(
