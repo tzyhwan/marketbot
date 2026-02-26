@@ -23,6 +23,7 @@ import os
 TELEGRAM_TOKEN      = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID             = os.environ.get("CHAT_ID")
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY")
+COINGLASS_API_KEY   = os.environ.get("COINGLASS_API_KEY")
 
 # ============================================================
 # AI CLIENT
@@ -109,22 +110,40 @@ def get_binance_futures_data():
     except Exception:
         result["long_pct"] = None
 
-    # Liquidations — last 24h (allForceOrders returns recent batch, filter client-side)
+    # Liquidations — CoinGlass API (Binance, last 1h vs prev 1h)
     try:
-        twenty_four_ago_ms = now_ms - 86400 * 1000
-        r = requests.get("https://fapi.binance.com/fapi/v1/allForceOrders",
-                         params={"symbol": "BTCUSDT", "limit": 1000}, timeout=10)
-        if r.ok:
-            orders = r.json()
-            orders = [o for o in orders if int(o.get("time", 0)) >= twenty_four_ago_ms]
-            liq_long  = sum(float(o["origQty"]) * float(o["price"]) for o in orders if o["side"] == "SELL")
-            liq_short = sum(float(o["origQty"]) * float(o["price"]) for o in orders if o["side"] == "BUY")
-            result["liq_longs_usd"]  = round(liq_long  / 1e6, 2)
-            result["liq_shorts_usd"] = round(liq_short / 1e6, 2)
+        cg_r = requests.get(
+            "https://open-api.coinglass.com/public/v2/liquidation_history",
+            headers={"coinglassSecret": COINGLASS_API_KEY},
+            params={"symbol": "BTC", "interval": "1h", "exchange": "Binance"},
+            timeout=10,
+        )
+        if cg_r.ok:
+            cg_data = cg_r.json().get("data", [])
+            if len(cg_data) >= 2:
+                cur  = cg_data[-1]
+                prev = cg_data[-2]
+                result["liq_longs_usd"]   = round(float(cur.get("longLiquidationUsd",  0)) / 1e6, 2)
+                result["liq_shorts_usd"]  = round(float(cur.get("shortLiquidationUsd", 0)) / 1e6, 2)
+                prev_long  = float(prev.get("longLiquidationUsd",  0)) / 1e6
+                prev_short = float(prev.get("shortLiquidationUsd", 0)) / 1e6
+                result["liq_longs_chg"]  = round((result["liq_longs_usd"]  - prev_long)  / prev_long  * 100, 1) if prev_long  > 0 else None
+                result["liq_shorts_chg"] = round((result["liq_shorts_usd"] - prev_short) / prev_short * 100, 1) if prev_short > 0 else None
+            elif len(cg_data) == 1:
+                cur = cg_data[-1]
+                result["liq_longs_usd"]  = round(float(cur.get("longLiquidationUsd",  0)) / 1e6, 2)
+                result["liq_shorts_usd"] = round(float(cur.get("shortLiquidationUsd", 0)) / 1e6, 2)
+                result["liq_longs_chg"]  = None
+                result["liq_shorts_chg"] = None
+            else:
+                result["liq_longs_usd"] = result["liq_shorts_usd"] = None
+                result["liq_longs_chg"] = result["liq_shorts_chg"] = None
         else:
-            result["liq_longs_usd"] = None
+            result["liq_longs_usd"] = result["liq_shorts_usd"] = None
+            result["liq_longs_chg"] = result["liq_shorts_chg"] = None
     except Exception:
-        result["liq_longs_usd"] = None
+        result["liq_longs_usd"] = result["liq_shorts_usd"] = None
+        result["liq_longs_chg"] = result["liq_shorts_chg"] = None
 
     return result
 
@@ -180,26 +199,40 @@ def get_bybit_futures_data():
     except Exception:
         result["long_pct"] = None
 
-    # Liquidations — last 24h via v5 liq endpoint
+    # Liquidations — CoinGlass API (Bybit, last 1h vs prev 1h)
     try:
-        twenty_four_ago_ms = now_ms - 86400 * 1000
-        r = requests.get("https://api.bybit.com/v5/market/liquidation",
-                         params={"category": "linear", "symbol": "BTCUSDT", "limit": 1000}, timeout=10)
-        if r.ok:
-            lst = r.json().get("result", {}).get("list", [])
-            # "Sell" side = long position was liquidated; "Buy" = short was liquidated
-            liq_long  = sum(float(o["size"]) * float(o["price"]) for o in lst
-                            if o.get("side") == "Sell" and int(o.get("updatedTime", 0)) >= twenty_four_ago_ms)
-            liq_short = sum(float(o["size"]) * float(o["price"]) for o in lst
-                            if o.get("side") == "Buy"  and int(o.get("updatedTime", 0)) >= twenty_four_ago_ms)
-            result["liq_longs_usd"]  = round(liq_long  / 1e6, 2)
-            result["liq_shorts_usd"] = round(liq_short / 1e6, 2)
+        cg_r = requests.get(
+            "https://open-api.coinglass.com/public/v2/liquidation_history",
+            headers={"coinglassSecret": COINGLASS_API_KEY},
+            params={"symbol": "BTC", "interval": "1h", "exchange": "Bybit"},
+            timeout=10,
+        )
+        if cg_r.ok:
+            cg_data = cg_r.json().get("data", [])
+            if len(cg_data) >= 2:
+                cur  = cg_data[-1]
+                prev = cg_data[-2]
+                result["liq_longs_usd"]   = round(float(cur.get("longLiquidationUsd",  0)) / 1e6, 2)
+                result["liq_shorts_usd"]  = round(float(cur.get("shortLiquidationUsd", 0)) / 1e6, 2)
+                prev_long  = float(prev.get("longLiquidationUsd",  0)) / 1e6
+                prev_short = float(prev.get("shortLiquidationUsd", 0)) / 1e6
+                result["liq_longs_chg"]  = round((result["liq_longs_usd"]  - prev_long)  / prev_long  * 100, 1) if prev_long  > 0 else None
+                result["liq_shorts_chg"] = round((result["liq_shorts_usd"] - prev_short) / prev_short * 100, 1) if prev_short > 0 else None
+            elif len(cg_data) == 1:
+                cur = cg_data[-1]
+                result["liq_longs_usd"]  = round(float(cur.get("longLiquidationUsd",  0)) / 1e6, 2)
+                result["liq_shorts_usd"] = round(float(cur.get("shortLiquidationUsd", 0)) / 1e6, 2)
+                result["liq_longs_chg"]  = None
+                result["liq_shorts_chg"] = None
+            else:
+                result["liq_longs_usd"] = result["liq_shorts_usd"] = None
+                result["liq_longs_chg"] = result["liq_shorts_chg"] = None
         else:
-            result["liq_longs_usd"]  = None
-            result["liq_shorts_usd"] = None
+            result["liq_longs_usd"] = result["liq_shorts_usd"] = None
+            result["liq_longs_chg"] = result["liq_shorts_chg"] = None
     except Exception:
-        result["liq_longs_usd"]  = None
-        result["liq_shorts_usd"] = None
+        result["liq_longs_usd"] = result["liq_shorts_usd"] = None
+        result["liq_longs_chg"] = result["liq_shorts_chg"] = None
 
     return result
 
@@ -256,38 +289,40 @@ def get_hyperliquid_data():
     except Exception:
         pass
 
-    # Liquidations — via clearinghouseState (liquidated positions in recent fills)
+    # Liquidations — CoinGlass API (Hyperliquid, last 1h vs prev 1h)
     try:
-        r = requests.post("https://api.hyperliquid.xyz/info",
-                          json={"type": "liquidationsByUser",
-                                "startTime": now_ms - 86400 * 1000},
-                          headers={"Content-Type": "application/json"},
-                          timeout=10)
-        if r.ok and isinstance(r.json(), list):
-            liqs = r.json()
-            liq_long  = sum(float(l.get("liquidatedNtlPos", 0)) for l in liqs if float(l.get("liquidatedNtlPos", 0)) < 0)
-            liq_short = sum(float(l.get("liquidatedNtlPos", 0)) for l in liqs if float(l.get("liquidatedNtlPos", 0)) > 0)
-            result["liq_longs_usd"]  = round(abs(liq_long)  / 1e6, 2)
-            result["liq_shorts_usd"] = round(abs(liq_short) / 1e6, 2)
-        else:
-            # Fallback: use recentTrades with isLiquidation flag
-            r2 = requests.post("https://api.hyperliquid.xyz/info",
-                               json={"type": "recentTrades", "coin": "BTC"},
-                               headers={"Content-Type": "application/json"},
-                               timeout=10)
-            if r2.ok and isinstance(r2.json(), list):
-                trades = [t for t in r2.json()
-                          if t.get("liquidation") and int(t.get("time", 0)) >= one_hour_ago_ms]
-                liq_long  = sum(float(t["sz"]) * float(t["px"]) for t in trades if t.get("side") == "B")
-                liq_short = sum(float(t["sz"]) * float(t["px"]) for t in trades if t.get("side") == "A")
-                result["liq_longs_usd"]  = round(liq_long  / 1e6, 2)
-                result["liq_shorts_usd"] = round(liq_short / 1e6, 2)
+        cg_r = requests.get(
+            "https://open-api.coinglass.com/public/v2/liquidation_history",
+            headers={"coinglassSecret": COINGLASS_API_KEY},
+            params={"symbol": "BTC", "interval": "1h", "exchange": "Hyperliquid"},
+            timeout=10,
+        )
+        if cg_r.ok:
+            cg_data = cg_r.json().get("data", [])
+            if len(cg_data) >= 2:
+                cur  = cg_data[-1]
+                prev = cg_data[-2]
+                result["liq_longs_usd"]   = round(float(cur.get("longLiquidationUsd",  0)) / 1e6, 2)
+                result["liq_shorts_usd"]  = round(float(cur.get("shortLiquidationUsd", 0)) / 1e6, 2)
+                prev_long  = float(prev.get("longLiquidationUsd",  0)) / 1e6
+                prev_short = float(prev.get("shortLiquidationUsd", 0)) / 1e6
+                result["liq_longs_chg"]  = round((result["liq_longs_usd"]  - prev_long)  / prev_long  * 100, 1) if prev_long  > 0 else None
+                result["liq_shorts_chg"] = round((result["liq_shorts_usd"] - prev_short) / prev_short * 100, 1) if prev_short > 0 else None
+            elif len(cg_data) == 1:
+                cur = cg_data[-1]
+                result["liq_longs_usd"]  = round(float(cur.get("longLiquidationUsd",  0)) / 1e6, 2)
+                result["liq_shorts_usd"] = round(float(cur.get("shortLiquidationUsd", 0)) / 1e6, 2)
+                result["liq_longs_chg"]  = None
+                result["liq_shorts_chg"] = None
             else:
-                result["liq_longs_usd"]  = None
-                result["liq_shorts_usd"] = None
+                result["liq_longs_usd"] = result["liq_shorts_usd"] = None
+                result["liq_longs_chg"] = result["liq_shorts_chg"] = None
+        else:
+            result["liq_longs_usd"] = result["liq_shorts_usd"] = None
+            result["liq_longs_chg"] = result["liq_shorts_chg"] = None
     except Exception:
-        result["liq_longs_usd"]  = None
-        result["liq_shorts_usd"] = None
+        result["liq_longs_usd"] = result["liq_shorts_usd"] = None
+        result["liq_longs_chg"] = result["liq_shorts_chg"] = None
 
     return result
 
@@ -381,16 +416,16 @@ def claude_market_snapshot(btc, bin_f, byb_f, hl_f):
 
 BTC Price: ${:,} ({:.2f}% 24h)  |  Volume: ${:,.0f} (Binance)
 
-Derivatives snapshot across exchanges (5min L/S | 24h liquidations):
+Derivatives snapshot across exchanges (5min L/S | 1h liquidations):
 
 Binance Futures:
-- OI: {}  Funding: {}  L/S (5m): {}  Liqs (24h): {}
+- OI: {}  Funding: {}  L/S (5m): {}  Liqs (1h, vs prev hr): {}
 
 Bybit:
-- OI: {}  Funding: {}  L/S (5m): {}  Liqs (24h): {}
+- OI: {}  Funding: {}  L/S (5m): {}  Liqs (1h, vs prev hr): {}
 
 Hyperliquid:
-- OI: {}  Funding: {}  Liqs (24h): {}
+- OI: {}  Funding: {}  Liqs (1h, vs prev hr): {}
 
 Write a punchy 4-6 sentence snapshot. Compare signals across exchanges where interesting. Highlight funding extremes, OI divergence, or liq imbalances.
 End with a one-line bias: Bullish / Bearish / Neutral and why.
@@ -521,7 +556,15 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     def fmt_liq(d):
         if d.get("liq_longs_usd") is None:
             return "N/A"
-        return "💀L ${:.2f}M  💀S ${:.2f}M".format(d["liq_longs_usd"], d["liq_shorts_usd"])
+        def chg(v):
+            if v is None:
+                return ""
+            arrow = "▲" if v >= 0 else "▼"
+            return " {}{:.0f}%".format(arrow, abs(v))
+        return "💀L ${:.2f}M{} 💀S ${:.2f}M{}".format(
+            d["liq_longs_usd"],  chg(d.get("liq_longs_chg")),
+            d["liq_shorts_usd"], chg(d.get("liq_shorts_chg")),
+        )
 
     msg = (
         "BTC Market Snapshot\n"
@@ -532,14 +575,14 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 Binance Futures\n"
         "OI: {}  |  Funding: {}\n"
         "L/S (5m): {}\n"
-        "Liqs (24h): {}\n\n"
+        "Liqs (1h): {}\n\n"
         "📊 Bybit\n"
         "OI: {}  |  Funding: {}\n"
         "L/S (5m): {}\n"
-        "Liqs (24h): {}\n\n"
+        "Liqs (1h): {}\n\n"
         "📊 Hyperliquid\n"
         "OI: {}  |  Funding: {}\n"
-        "Liqs (24h): {}\n\n"
+        "Liqs (1h): {}\n\n"
         "🤖 AI Analysis:\n{}\n\n"
         "Time: {} UTC"
     ).format(
