@@ -81,7 +81,7 @@ def get_coinglass_data():
     return result
 
 
-def get_crypto_news(limit=12):
+def get_crypto_news(limit=12, hours=6):
     try:
         r = requests.get(
             "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -89,7 +89,7 @@ def get_crypto_news(limit=12):
         )
         r.raise_for_status()
         root = ET.fromstring(r.content)
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         results = []
         for item in root.findall(".//item"):
             title   = item.findtext("title", "")
@@ -104,9 +104,7 @@ def get_crypto_news(limit=12):
             results.append({"title": title, "url": url, "source": "CoinDesk"})
             if len(results) >= limit:
                 break
-        if not results:
-            return [{"title": "No news in the last hour", "url": "", "source": "CoinDesk"}]
-        return results
+        return results  # Empty list = genuinely no news
     except Exception as e:
         return [{"title": "News fetch error: {}".format(e), "url": "", "source": ""}]
 
@@ -142,16 +140,16 @@ def get_polymarket_fed_data():
                     yes_price = 0
                 # Clean up question to get just the outcome name
                 q = question.lower()
-                if "no change" in q:
+                if "no change" in q or "hold" in q or "unchanged" in q:
                     label = "No Change"
-                elif "50+" in q or "50 +" in q:
+                elif "50+" in q or "50 +" in q or "50 basis" in q:
                     label = "50+ bps Cut"
-                elif "25 bps decrease" in q or "decrease by 25" in q:
+                elif ("25" in q and ("cut" in q or "decrease" in q or "lower" in q or "reduction" in q or "basis" in q)) and "50" not in q:
                     label = "25 bps Cut"
-                elif "25+ bps increase" in q or "increase" in q:
+                elif "increase" in q or "hike" in q or "raise" in q:
                     label = "25+ bps Hike"
                 else:
-                    label = question[:30]
+                    label = question[:40]  # Keep full label for debugging
                 outcomes[label] = round(yes_price, 1)
             results.append({"label": m["label"], "outcomes": outcomes})
         except Exception as e:
@@ -306,8 +304,17 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Fetching last 1hr news...")
-    news    = get_crypto_news(limit=12)
+    await update.message.reply_text("Fetching last 6hr news...")
+    news = get_crypto_news(limit=12, hours=6)
+
+    if not news or (len(news) == 1 and "error" in news[0]["title"].lower()):
+        await update.message.reply_text(
+            "📭 No news articles found in the last 6 hours.\n\nTime: {} UTC".format(
+                datetime.now(timezone.utc).strftime("%H:%M")
+            )
+        )
+        return
+
     summary = claude_news_summary(news)
     links = "\n".join(
         "- {}{}  {}".format(
@@ -318,7 +325,7 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for n in news[:6] if n["url"]
     )
     msg = (
-        "News Summary (Last 1 Hour)\n\n"
+        "News Summary (Last 6 Hours)\n\n"
         "{}\n\n"
         "Top Links:\n{}\n\n"
         "Time: {} UTC"
@@ -353,6 +360,7 @@ async def cmd_fed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if d["outcomes"]:
             # Sort: No Change first, then cuts, then hike
             order = ["No Change", "25 bps Cut", "50+ bps Cut", "25+ bps Hike"]
+            shown = set()
             for key in order:
                 if key in d["outcomes"]:
                     pct = d["outcomes"][key]
@@ -365,6 +373,11 @@ async def cmd_fed(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         color = "🟡"
                     lines += "  {} {}: {} {}%\n".format(color, key, bar, pct)
+                    shown.add(key)
+            # Show any unrecognised outcomes (helps debug label mismatches)
+            for key, pct in d["outcomes"].items():
+                if key not in shown:
+                    lines += "  ❓ {}: {}%\n".format(key, pct)
         else:
             lines += "  Data unavailable\n"
 
