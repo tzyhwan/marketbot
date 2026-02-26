@@ -301,8 +301,7 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "BTC Market Snapshot\n"
         "Price:      ${:,}\n"
         "24h Change: {} {:.2f}%\n"
-        "Volume:     ${:.2f}B\n"
-        "Mkt Cap:    ${:.1f}B\n\n"
+        "Volume (Binance 24h): ${:.2f}B\n\n"
         "AI Analysis:\n{}\n\n"
         "Time: {} UTC"
     ).format(
@@ -310,7 +309,6 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
         change_emoji,
         btc.get("change_24h", 0),
         btc.get("volume_24h", 0) / 1e9,
-        btc.get("market_cap", 0) / 1e9,
         analysis,
         datetime.now(timezone.utc).strftime("%H:%M"),
     )
