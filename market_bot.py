@@ -23,7 +23,6 @@ import os
 TELEGRAM_TOKEN      = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID             = os.environ.get("CHAT_ID")
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY")
-COINGLASS_API_KEY   = os.environ.get("COINGLASS_API_KEY")
 
 # ============================================================
 # AI CLIENT
@@ -69,31 +68,225 @@ def get_btc_price():
         return {"error": str(e)}
 
 
-def get_coinglass_data():
-    headers = {"coinglassSecret": COINGLASS_API_KEY}
+def get_binance_futures_data():
+    """Fetch BTC derivatives data from Binance Futures — no API key needed."""
     result = {}
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    one_hour_ago_ms = now_ms - 3600 * 1000
+
+    # Open Interest
     try:
-        r = requests.get(
-            "https://open-api.coinglass.com/public/v2/open_interest",
-            headers=headers,
-            params={"symbol": "BTC"},
-            timeout=10,
-        )
-        result["open_interest"] = r.json() if r.ok else "Error {}".format(r.status_code)
-    except Exception as e:
-        result["open_interest"] = str(e)
+        r = requests.get("https://fapi.binance.com/fapi/v1/openInterest",
+                         params={"symbol": "BTCUSDT"}, timeout=10)
+        if r.ok:
+            oi = float(r.json()["openInterest"])
+            pr = requests.get("https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT", timeout=5)
+            btc_price = float(pr.json()["price"]) if pr.ok else 0
+            result["oi_usd"] = round(oi * btc_price / 1e9, 2)
+        else:
+            result["oi_usd"] = None
+    except Exception:
+        result["oi_usd"] = None
+
+    # Funding Rate
     try:
-        r = requests.get(
-            "https://open-api.coinglass.com/public/v2/liquidation_history",
-            headers=headers,
-            params={"symbol": "BTC", "interval": "1d"},
-            timeout=10,
-        )
-        result["liquidations"] = r.json() if r.ok else "Error {}".format(r.status_code)
-    except Exception as e:
-        result["liquidations"] = str(e)
+        r = requests.get("https://fapi.binance.com/fapi/v1/fundingRate",
+                         params={"symbol": "BTCUSDT", "limit": 1}, timeout=10)
+        result["funding_rate"] = round(float(r.json()[0]["fundingRate"]) * 100, 4) if r.ok else None
+    except Exception:
+        result["funding_rate"] = None
+
+    # L/S Ratio — 5 min
+    try:
+        r = requests.get("https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+                         params={"symbol": "BTCUSDT", "period": "5m", "limit": 1}, timeout=10)
+        if r.ok:
+            d = r.json()[0]
+            result["long_pct"]  = round(float(d["longAccount"])  * 100, 1)
+            result["short_pct"] = round(float(d["shortAccount"]) * 100, 1)
+        else:
+            result["long_pct"] = None
+    except Exception:
+        result["long_pct"] = None
+
+    # Liquidations — last 1 hour
+    try:
+        r = requests.get("https://fapi.binance.com/fapi/v1/allForceOrders",
+                         params={"symbol": "BTCUSDT", "startTime": one_hour_ago_ms, "limit": 1000}, timeout=10)
+        if r.ok:
+            orders = r.json()
+            liq_long  = sum(float(o["origQty"]) * float(o["price"]) for o in orders if o["side"] == "SELL")
+            liq_short = sum(float(o["origQty"]) * float(o["price"]) for o in orders if o["side"] == "BUY")
+            result["liq_longs_usd"]  = round(liq_long  / 1e6, 2)
+            result["liq_shorts_usd"] = round(liq_short / 1e6, 2)
+        else:
+            result["liq_longs_usd"] = None
+    except Exception:
+        result["liq_longs_usd"] = None
+
     return result
 
+
+def get_bybit_futures_data():
+    """Fetch BTC derivatives data from Bybit — no API key needed."""
+    result = {}
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    one_hour_ago_ms = now_ms - 3600 * 1000
+
+    # Open Interest
+    try:
+        r = requests.get("https://api.bybit.com/v5/market/open-interest",
+                         params={"category": "linear", "symbol": "BTCUSDT", "intervalTime": "1h", "limit": 1}, timeout=10)
+        if r.ok:
+            data = r.json()
+            oi_list = data.get("result", {}).get("list", [])
+            if oi_list:
+                oi_usd = float(oi_list[0]["openInterestValue"])
+                result["oi_usd"] = round(oi_usd / 1e9, 2)
+            else:
+                result["oi_usd"] = None
+        else:
+            result["oi_usd"] = None
+    except Exception:
+        result["oi_usd"] = None
+
+    # Funding Rate
+    try:
+        r = requests.get("https://api.bybit.com/v5/market/funding/history",
+                         params={"category": "linear", "symbol": "BTCUSDT", "limit": 1}, timeout=10)
+        if r.ok:
+            lst = r.json().get("result", {}).get("list", [])
+            result["funding_rate"] = round(float(lst[0]["fundingRate"]) * 100, 4) if lst else None
+        else:
+            result["funding_rate"] = None
+    except Exception:
+        result["funding_rate"] = None
+
+    # L/S Ratio — 5 min
+    try:
+        r = requests.get("https://api.bybit.com/v5/market/account-ratio",
+                         params={"category": "linear", "symbol": "BTCUSDT", "period": "5min", "limit": 1}, timeout=10)
+        if r.ok:
+            lst = r.json().get("result", {}).get("list", [])
+            if lst:
+                buy_ratio = float(lst[0]["buyRatio"])
+                result["long_pct"]  = round(buy_ratio * 100, 1)
+                result["short_pct"] = round((1 - buy_ratio) * 100, 1)
+            else:
+                result["long_pct"] = None
+        else:
+            result["long_pct"] = None
+    except Exception:
+        result["long_pct"] = None
+
+    # Liquidations — last 1 hour (Bybit provides liq records)
+    try:
+        r = requests.get("https://api.bybit.com/v5/market/recent-trade",
+                         params={"category": "linear", "symbol": "BTCUSDT", "limit": 1000}, timeout=10)
+        # Bybit doesn't have a free liq endpoint; mark N/A
+        result["liq_longs_usd"]  = None
+        result["liq_shorts_usd"] = None
+    except Exception:
+        result["liq_longs_usd"]  = None
+        result["liq_shorts_usd"] = None
+
+    # Use liquidation websocket data via REST snapshot
+    try:
+        r = requests.get("https://api.bybit.com/v5/market/liquidation",
+                         params={"category": "linear", "symbol": "BTCUSDT", "limit": 200}, timeout=10)
+        if r.ok:
+            lst = r.json().get("result", {}).get("list", [])
+            liq_long  = sum(float(o["size"]) * float(o["price"]) for o in lst if o["side"] == "Buy")
+            liq_short = sum(float(o["size"]) * float(o["price"]) for o in lst if o["side"] == "Sell")
+            result["liq_longs_usd"]  = round(liq_long  / 1e6, 2)
+            result["liq_shorts_usd"] = round(liq_short / 1e6, 2)
+    except Exception:
+        pass
+
+    return result
+
+
+def get_hyperliquid_data():
+    """Fetch BTC derivatives data from Hyperliquid — no API key needed."""
+    result = {}
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    one_hour_ago_ms = now_ms - 3600 * 1000
+
+    try:
+        # Meta + asset contexts gives OI and funding
+        r = requests.post("https://api.hyperliquid.xyz/info",
+                          json={"type": "metaAndAssetCtxs"},
+                          headers={"Content-Type": "application/json"},
+                          timeout=10)
+        if r.ok:
+            data = r.json()
+            universe = data[0].get("universe", [])
+            ctxs     = data[1]
+            btc_idx  = next((i for i, a in enumerate(universe) if a["name"] == "BTC"), None)
+            if btc_idx is not None:
+                ctx = ctxs[btc_idx]
+                oi_usd = float(ctx.get("openInterest", 0)) * float(ctx.get("markPx", 0))
+                result["oi_usd"]       = round(oi_usd / 1e9, 2)
+                result["funding_rate"] = round(float(ctx.get("funding", 0)) * 100, 4)
+            else:
+                result["oi_usd"] = None
+        else:
+            result["oi_usd"] = None
+    except Exception:
+        result["oi_usd"] = None
+
+    # L/S Ratio via globalSummary
+    try:
+        r = requests.post("https://api.hyperliquid.xyz/info",
+                          json={"type": "assetPositions", "user": "0x0000000000000000000000000000000000000000"},
+                          headers={"Content-Type": "application/json"},
+                          timeout=10)
+        result["long_pct"]  = None
+        result["short_pct"] = None
+    except Exception:
+        result["long_pct"]  = None
+        result["short_pct"] = None
+
+    # Use globalFundingHistory for L/S approximation via openInterest sides
+    try:
+        r = requests.post("https://api.hyperliquid.xyz/info",
+                          json={"type": "fundingHistory", "coin": "BTC",
+                                "startTime": one_hour_ago_ms},
+                          headers={"Content-Type": "application/json"},
+                          timeout=10)
+        # fundingHistory doesn't give L/S directly; skip
+    except Exception:
+        pass
+
+    # Liquidations — last 1 hour
+    try:
+        r = requests.post("https://api.hyperliquid.xyz/info",
+                          json={"type": "userFills", "user": "0x0000000000000000000000000000000000000000"},
+                          headers={"Content-Type": "application/json"},
+                          timeout=10)
+        result["liq_longs_usd"]  = None
+        result["liq_shorts_usd"] = None
+    except Exception:
+        result["liq_longs_usd"]  = None
+        result["liq_shorts_usd"] = None
+
+    # Proper liquidation endpoint
+    try:
+        r = requests.post("https://api.hyperliquid.xyz/info",
+                          json={"type": "liquidations", "coin": "BTC",
+                                "startTime": one_hour_ago_ms, "endTime": now_ms},
+                          headers={"Content-Type": "application/json"},
+                          timeout=10)
+        if r.ok and isinstance(r.json(), list):
+            liqs = r.json()
+            liq_long  = sum(float(l.get("sz", 0)) * float(l.get("px", 0)) for l in liqs if l.get("side") == "B")
+            liq_short = sum(float(l.get("sz", 0)) * float(l.get("px", 0)) for l in liqs if l.get("side") == "A")
+            result["liq_longs_usd"]  = round(liq_long  / 1e6, 2)
+            result["liq_shorts_usd"] = round(liq_short / 1e6, 2)
+    except Exception:
+        pass
+
+    return result
 
 def get_crypto_news(limit=12, hours=6):
     try:
@@ -175,27 +368,34 @@ def get_polymarket_fed_data():
 # AI ANALYSIS
 # ============================================================
 
-def claude_market_snapshot(btc, cg):
+def claude_market_snapshot(btc, bin_f, byb_f, hl_f):
+    def fmt_oi(d):   return "${:.2f}B".format(d["oi_usd"]) if d.get("oi_usd") is not None else "N/A"
+    def fmt_fr(d):   return "{:.4f}%".format(d["funding_rate"]) if d.get("funding_rate") is not None else "N/A"
+    def fmt_ls(d):   return "L {:.1f}% / S {:.1f}%".format(d["long_pct"], d["short_pct"]) if d.get("long_pct") is not None else "N/A"
+    def fmt_liq(d):  return "Longs ${:.2f}M / Shorts ${:.2f}M".format(d["liq_longs_usd"], d["liq_shorts_usd"]) if d.get("liq_longs_usd") is not None else "N/A"
+
     prompt = """You are a concise crypto market analyst writing for a Telegram bot.
 
-Real-time BTC data:
-- Price:      ${:,}
-- 24h Change: {:.2f}%
-- Market Cap: ${:,.0f}
-- 24h Volume: ${:,.0f}
+BTC Price: ${:,} ({:.2f}% 24h)  |  Volume: ${:,.0f} (Binance)
 
-CoinGlass Open Interest: {}
-CoinGlass Liquidations:  {}
+Derivatives snapshot across exchanges (5min L/S | 1hr liquidations):
 
-Write a punchy 4-6 sentence snapshot. Highlight any notable signals.
-End with a one-line bias: Bullish or Bearish or Neutral and why.
-Do not use ## headers or ** bold markdown. Use plain text with emojis only.""".format(
-        btc.get("price", 0),
-        btc.get("change_24h", 0),
-        btc.get("market_cap", 0),
-        btc.get("volume_24h", 0),
-        str(cg.get("open_interest", "N/A"))[:600],
-        str(cg.get("liquidations", "N/A"))[:600],
+Binance Futures:
+- OI: {}  Funding: {}  L/S (5m): {}  Liqs (1h): {}
+
+Bybit:
+- OI: {}  Funding: {}  L/S (5m): {}  Liqs (1h): {}
+
+Hyperliquid:
+- OI: {}  Funding: {}  Liqs (1h): {}
+
+Write a punchy 4-6 sentence snapshot. Compare signals across exchanges where interesting. Highlight funding extremes, OI divergence, or liq imbalances.
+End with a one-line bias: Bullish / Bearish / Neutral and why.
+Do not use ## headers or ** bold. Plain text + emojis only.""".format(
+        btc.get("price", 0), btc.get("change_24h", 0), btc.get("volume_24h", 0),
+        fmt_oi(bin_f), fmt_fr(bin_f), fmt_ls(bin_f), fmt_liq(bin_f),
+        fmt_oi(byb_f), fmt_fr(byb_f), fmt_ls(byb_f), fmt_liq(byb_f),
+        fmt_oi(hl_f),  fmt_fr(hl_f),  fmt_liq(hl_f),
     )
     response = claude.messages.create(
         model="claude-opus-4-6",
@@ -281,7 +481,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Market Intelligence Bot\n\n"
         "Commands:\n"
-        "/market  - Live BTC snapshot + CoinGlass\n"
+        "/market  - Live BTC snapshot + Binance Futures\n"
         "/news    - Latest crypto news last 1hr\n"
         "/weekly  - Full catalyst report with predictions\n"
         "/fed     - Fed rate cut predictions from Polymarket\n"
@@ -292,27 +492,69 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Fetching real-time data...")
-    btc      = get_btc_price()
-    cg       = get_coinglass_data()
-    analysis = claude_market_snapshot(btc, cg)
-    change_emoji = "UP" if btc.get("change_24h", 0) > 0 else "DOWN"
+    await update.message.reply_text("Fetching real-time data from Binance, Bybit, Hyperliquid...")
+    btc   = get_btc_price()
+    bin_f = get_binance_futures_data()
+    byb_f = get_bybit_futures_data()
+    hl_f  = get_hyperliquid_data()
+    analysis = claude_market_snapshot(btc, bin_f, byb_f, hl_f)
+
+    change_emoji = "📈" if btc.get("change_24h", 0) > 0 else "📉"
+
+    def fmt_oi(d):
+        return "${:.2f}B".format(d["oi_usd"]) if d.get("oi_usd") is not None else "N/A"
+
+    def fmt_fr(d):
+        if d.get("funding_rate") is None:
+            return "N/A"
+        e = "🟢" if d["funding_rate"] >= 0 else "🔴"
+        return "{} {:.4f}%".format(e, d["funding_rate"])
+
+    def fmt_ls(d):
+        if d.get("long_pct") is None:
+            return "N/A"
+        return "🟢 {:.1f}% / 🔴 {:.1f}%".format(d["long_pct"], d["short_pct"])
+
+    def fmt_liq(d):
+        if d.get("liq_longs_usd") is None:
+            return "N/A"
+        return "💀L ${:.2f}M  💀S ${:.2f}M".format(d["liq_longs_usd"], d["liq_shorts_usd"])
+
     msg = (
         "BTC Market Snapshot\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
         "Price:      ${:,}\n"
         "24h Change: {} {:.2f}%\n"
-        "Volume (Binance 24h): ${:.2f}B\n\n"
-        "AI Analysis:\n{}\n\n"
+        "Volume:     ${:.2f}B (Binance 24h)\n\n"
+        "📊 Binance Futures\n"
+        "OI: {}  |  Funding: {}\n"
+        "L/S (5m): {}\n"
+        "Liqs (1h): {}\n\n"
+        "📊 Bybit\n"
+        "OI: {}  |  Funding: {}\n"
+        "L/S (5m): {}\n"
+        "Liqs (1h): {}\n\n"
+        "📊 Hyperliquid\n"
+        "OI: {}  |  Funding: {}\n"
+        "Liqs (1h): {}\n\n"
+        "🤖 AI Analysis:\n{}\n\n"
         "Time: {} UTC"
     ).format(
         btc.get("price", 0),
         change_emoji,
         btc.get("change_24h", 0),
         btc.get("volume_24h", 0) / 1e9,
+        fmt_oi(bin_f), fmt_fr(bin_f), fmt_ls(bin_f), fmt_liq(bin_f),
+        fmt_oi(byb_f), fmt_fr(byb_f), fmt_ls(byb_f), fmt_liq(byb_f),
+        fmt_oi(hl_f),  fmt_fr(hl_f),  fmt_liq(hl_f),
         analysis,
         datetime.now(timezone.utc).strftime("%H:%M"),
     )
-    await update.message.reply_text(msg)
+    if len(msg) > 4000:
+        for chunk in [msg[i:i+4000] for i in range(0, len(msg), 4000)]:
+            await update.message.reply_text(chunk)
+    else:
+        await update.message.reply_text(msg)
 
 
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
