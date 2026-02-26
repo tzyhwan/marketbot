@@ -36,20 +36,34 @@ claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 def get_btc_price():
     try:
-        url = (
-            "https://api.coingecko.com/api/v3/simple/price"
-            "?ids=bitcoin&vs_currencies=usd&include_24hr_change=true"
-            "&include_market_cap=true&include_24hr_vol=true"
-        )
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, timeout=10, headers=headers)
+        # Binance public API - no key required, very reliable
+        ticker_url = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
+        r = requests.get(ticker_url, timeout=10)
         r.raise_for_status()
-        d = r.json()["bitcoin"]
+        d = r.json()
+        price      = float(d["lastPrice"])
+        change_24h = float(d["priceChangePercent"])
+        volume_24h = float(d["quoteVolume"])  # in USD
+
+        # Get market cap from CoinGecko as fallback (best effort)
+        market_cap = 0
+        try:
+            cg = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price"
+                "?ids=bitcoin&vs_currencies=usd&include_market_cap=true",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=6,
+            )
+            if cg.ok:
+                market_cap = cg.json()["bitcoin"].get("usd_market_cap", 0)
+        except Exception:
+            market_cap = price * 19_700_000  # rough estimate from circulating supply
+
         return {
-            "price":      d["usd"],
-            "change_24h": d["usd_24h_change"],
-            "market_cap": d["usd_market_cap"],
-            "volume_24h": d["usd_24h_vol"],
+            "price":      price,
+            "change_24h": change_24h,
+            "market_cap": market_cap,
+            "volume_24h": volume_24h,
         }
     except Exception as e:
         return {"error": str(e)}
