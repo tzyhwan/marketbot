@@ -515,6 +515,36 @@ Keep it tight for Telegram.""".format(summary)
 # TELEGRAM HANDLERS
 # ============================================================
 
+async def cmd_debug_liq(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Debug command to show raw CoinGlass liquidation API response."""
+    import json as _json
+    msg = "CoinGlass Liq Debug\n━━━━━━━━━━━━━━━━\n"
+    for exchange in ["Binance", "Bybit", "Hyperliquid"]:
+        try:
+            r = requests.get(
+                "https://open-api.coinglass.com/public/v2/liquidation_history",
+                headers={"coinglassSecret": COINGLASS_API_KEY},
+                params={"symbol": "BTC", "interval": "1h", "exchange": exchange},
+                timeout=10,
+            )
+            msg += "{}\n  Status: {}\n".format(exchange, r.status_code)
+            if r.ok:
+                data = r.json()
+                records = data.get("data", [])
+                msg += "  Records: {}\n".format(len(records))
+                if records:
+                    msg += "  Latest keys: {}\n".format(list(records[-1].keys())[:8])
+                    msg += "  Latest: {}\n".format(_json.dumps(records[-1])[:200])
+                else:
+                    msg += "  Raw: {}\n".format(str(data)[:200])
+            else:
+                msg += "  Error body: {}\n".format(r.text[:200])
+        except Exception as e:
+            msg += "{}\n  Exception: {}\n".format(exchange, str(e))
+        msg += "\n"
+    await update.message.reply_text(msg)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Market Intelligence Bot\n\n"
@@ -749,6 +779,7 @@ async def main():
     app.add_handler(CommandHandler("news",   cmd_news))
     app.add_handler(CommandHandler("weekly", cmd_weekly))
     app.add_handler(CommandHandler("fed",    cmd_fed))
+    app.add_handler(CommandHandler("debugliq", cmd_debug_liq))
 
     print("Market Intelligence Bot is running...")
     print("Commands: /market /news /weekly /fed")
