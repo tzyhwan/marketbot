@@ -67,7 +67,18 @@ class BaseAPIClient:
                         await asyncio.sleep(retry_after)
                         continue
                     resp.raise_for_status()
-                    return await resp.json()
+                    try:
+                        return await resp.json()
+                    except (ValueError, aiohttp.ContentTypeError) as exc:
+                        body_preview = (await resp.text())[:200]
+                        log.error("json_parse_error", url=url,
+                                  status=resp.status, body=body_preview,
+                                  error=str(exc))
+                        raise aiohttp.ClientResponseError(
+                            resp.request_info, resp.history,
+                            status=resp.status,
+                            message=f"Invalid JSON from {url}",
+                        ) from exc
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 log.warning("request_error", url=url,
                             attempt=attempt + 1, error=str(exc))

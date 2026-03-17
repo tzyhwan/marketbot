@@ -4,31 +4,35 @@ Ported from telegram-pinescript-bot webhook_server.py.
 """
 from __future__ import annotations
 
+import hmac
 import json
-import typing
 
 import structlog
 from aiohttp import web
+from telegram.constants import ParseMode
 
 log = structlog.get_logger()
 
-_bot_app = None
-_get_subscribers: typing.Callable | None = None
+# Module-level state, set once via init()
+_bot = None
+_bot_data: dict | None = None
+_webhook_secret: str = ""
 
 
-def init(bot_app, get_subscribers: typing.Callable) -> None:
-    """Wire up the bot application and subscriber accessor."""
-    global _bot_app, _get_subscribers
-    _bot_app = bot_app
-    _get_subscribers = get_subscribers
+def init(secret: str, bot, bot_data: dict) -> None:
+    """Wire up the webhook server with bot instance and shared state."""
+    global _bot, _bot_data, _webhook_secret
+    _bot = bot
+    _bot_data = bot_data
+    _webhook_secret = secret
 
 
 def _format_alert(data: dict) -> str:
-    action = data.get("action", "SIGNAL").upper()
-    ticker = data.get("ticker", "???")
-    price = data.get("price", "—")
-    tp = data.get("tp", "—")
-    sl = data.get("sl", "—")
+    action = str(data.get("action", "SIGNAL")).upper()
+    ticker = str(data.get("ticker", "???"))
+    price = str(data.get("price", "—"))
+    tp = str(data.get("tp", "—"))
+    sl = str(data.get("sl", "—"))
     extra = {k: v for k, v in data.items() if k not in ("action", "ticker", "price", "tp", "sl")}
 
     arrow = "\u2B06" if action == "LONG" else "\u2B07" if action == "SHORT" else "\u26A1"
@@ -45,11 +49,8 @@ def _format_alert(data: dict) -> str:
 
 async def handle_webhook(request: web.Request) -> web.Response:
     """POST /webhook — receives TradingView alert JSON."""
-    from src.config import Settings
-    settings = Settings()
-
     secret = request.headers.get("X-Webhook-Secret", "")
-    if secret != settings.webhook_secret:
+    if not hmac.compare_digest(secret, _webhook_secret):
         return web.Response(status=403, text="Forbidden")
 
     try:
@@ -64,13 +65,14 @@ async def handle_webhook(request: web.Request) -> web.Response:
     msg = _format_alert(data)
     log.info("webhook_alert_received", msg=msg)
 
-    subscribers = _get_subscribers() if _get_subscribers else set()
-    bot = _bot_app.bot if _bot_app else None
+    subscribers = _bot_data.get("alert_subscribers", set()) if _bot_data else set()
 
-    if bot and subscribers:
+    if _bot and subscribers:
         for chat_id in subscribers:
             try:
-                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
+                await _bot.send_message(
+                    chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML,
+                )
             except Exception as e:
                 log.error("webhook_send_failed", chat_id=chat_id, error=str(e))
 
@@ -79,7 +81,7 @@ async def handle_webhook(request: web.Request) -> web.Response:
 
 def create_webhook_app() -> web.Application:
     """Create the aiohttp web app for the webhook server."""
-    app = web.Application()
+    app = web.Application(client_max_size=1024 * 1024)  # 1MB max payload
     app.router.add_post("/webhook", handle_webhook)
     app.router.add_get("/health", lambda _: web.Response(text="OK"))
     return app

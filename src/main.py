@@ -7,6 +7,7 @@ import signal
 import sys
 
 import structlog
+from aiohttp.web import AppRunner, TCPSite
 from telegram import Update
 from telegram.ext import Application
 
@@ -39,10 +40,22 @@ async def main() -> None:
     setup_logging()
     settings = Settings()
 
-    # ── Database ────────────────────────────────────────
+    # Bug #5: Warn on insecure default webhook secret
+    if settings.webhook_secret == "change_me":
+        log.warning(
+            "INSECURE_WEBHOOK_SECRET",
+            msg="Webhook secret is still the default 'change_me'. "
+                "Set WEBHOOK_SECRET in .env to a strong random value.",
+        )
+
+    # ── Database (Bug #4: fail-fast on connection error) ──
     os.makedirs(os.path.dirname(settings.db_path) or ".", exist_ok=True)
     db = Database(settings.db_path)
-    await db.connect()
+    try:
+        await db.connect()
+    except Exception as exc:
+        log.error("database_connection_failed", path=settings.db_path, error=str(exc))
+        sys.exit(1)
 
     # ── API Clients ─────────────────────────────────────
     claude = ClaudeService(
@@ -119,14 +132,13 @@ async def main() -> None:
         background_tasks.append(asyncio.create_task(ghost.run_forever()))
         log.info("background_modules_started")
 
-        # Start webhook server (TradingView alerts)
-        webhook_app = create_webhook_app(settings.webhook_secret)
-        init_webhook(webhook_app, app.bot, app.bot_data)
-        runner = __import__("aiohttp.web", fromlist=["AppRunner"]).AppRunner(webhook_app)
+        # Bug #1: Fixed — create_webhook_app() takes 0 args,
+        # init_webhook() takes (secret, bot, bot_data)
+        webhook_app = create_webhook_app()
+        init_webhook(settings.webhook_secret, app.bot, app.bot_data)
+        runner = AppRunner(webhook_app)
         await runner.setup()
-        site = __import__("aiohttp.web", fromlist=["TCPSite"]).TCPSite(
-            runner, settings.webhook_host, settings.webhook_port,
-        )
+        site = TCPSite(runner, settings.webhook_host, settings.webhook_port)
         await site.start()
         log.info("webhook_server_started", host=settings.webhook_host, port=settings.webhook_port)
 

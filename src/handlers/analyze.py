@@ -1,6 +1,7 @@
 """/analyze — Full chart + AI trade analysis (Claude Sonnet)."""
 from __future__ import annotations
 
+import asyncio
 import io
 
 from telegram import InputFile, Update
@@ -71,7 +72,7 @@ async def cmd_analyze(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         binance = deps["binance"]
         df = await fetch_klines(binance, asset, timeframe)
-        img_bytes = generate_chart(df, asset, timeframe, levels)
+        img_bytes = await asyncio.to_thread(generate_chart, df, asset, timeframe, levels)
         await update.message.reply_photo(
             photo=InputFile(io.BytesIO(img_bytes), filename=f"{asset}_{timeframe}.png"),
         )

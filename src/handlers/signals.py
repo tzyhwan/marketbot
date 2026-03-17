@@ -1,6 +1,7 @@
 """/autosignal, /stopsignal, /signals — auto-signal scheduling."""
 from __future__ import annotations
 
+import asyncio
 import io
 
 import structlog
@@ -58,7 +59,7 @@ async def _auto_signal_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             binance = deps["binance"]
             df = await fetch_klines(binance, asset, timeframe)
-            img_bytes = generate_chart(df, asset, timeframe, levels)
+            img_bytes = await asyncio.to_thread(generate_chart, df, asset, timeframe, levels)
             await ctx.bot.send_photo(
                 chat_id,
                 photo=InputFile(io.BytesIO(img_bytes), filename=f"{asset}_{timeframe}.png"),
